@@ -24,8 +24,10 @@ sanitized text.
 **What it does**
 
 1. Opens an SFTP session to `server_ip` as `os_user`, authenticating with
-   `ssh_key`. The target host must already be in the connecting user's
-   `known_hosts` — unknown hosts are rejected rather than silently trusted.
+   `ssh_key`. Strict host key checking is disabled (`StrictHostKeyChecking=no`
+   equivalent) — unknown hosts are auto-accepted rather than requiring a
+   `known_hosts` entry. This trades off protection against man-in-the-middle
+   attacks for not having to pre-seed `known_hosts` for every target server.
 2. Looks in `<deployment_directory>/<application>/` on that server.
 3. Reads `server.xml`.
 4. Scans `server.xml` for `<include location="...">` references and any

@@ -47,9 +47,9 @@ def _sftp_session(server_ip: str, os_user: str, ssh_key: str):
 
     client = paramiko.SSHClient()
     client.load_system_host_keys()
-    # Refuse unknown hosts rather than silently trusting them (no AutoAddPolicy) -
-    # the target server must already be in the connecting user's known_hosts.
-    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    # Strict host key checking disabled: unknown hosts are auto-accepted rather
+    # than requiring a known_hosts entry (equivalent to StrictHostKeyChecking=no).
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         client.connect(
             hostname=server_ip,
