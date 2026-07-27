@@ -7,6 +7,7 @@ import paramiko
 
 _SSH_CONNECT_TIMEOUT = 10
 _SSH_PORT = 22
+_DEFAULT_EXEC_TIMEOUT = 15
 
 
 @contextmanager
@@ -33,3 +34,12 @@ def ssh_client(server_ip: str, os_user: str, ssh_key: str):
         yield client
     finally:
         client.close()
+
+
+def run_command(client: paramiko.SSHClient, command: str, timeout: int = _DEFAULT_EXEC_TIMEOUT) -> tuple[int, str, str]:
+    """Run a command over an existing SSH connection and collect exit status, stdout, stderr."""
+    _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    exit_status = stdout.channel.recv_exit_status()
+    out = stdout.read().decode("utf-8", errors="replace")
+    err = stderr.read().decode("utf-8", errors="replace")
+    return exit_status, out, err

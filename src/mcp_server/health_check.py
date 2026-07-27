@@ -10,9 +10,7 @@ import shlex
 
 import paramiko
 
-from .ssh import ssh_client
-
-_EXEC_TIMEOUT = 15
+from .ssh import run_command, ssh_client
 
 _HTTP_CHECK_SCRIPT_TEMPLATE = r"""URL=__URL__
 if command -v curl >/dev/null 2>&1; then
@@ -57,17 +55,9 @@ def _build_process_check_script(application: str) -> str:
     return _PROCESS_CHECK_SCRIPT_TEMPLATE.replace("__APP__", shlex.quote(application))
 
 
-def _run(client: paramiko.SSHClient, command: str) -> tuple[int, str, str]:
-    _stdin, stdout, stderr = client.exec_command(command, timeout=_EXEC_TIMEOUT)
-    exit_status = stdout.channel.recv_exit_status()
-    out = stdout.read().decode("utf-8", errors="replace")
-    err = stderr.read().decode("utf-8", errors="replace")
-    return exit_status, out, err
-
-
 def _http_check(client: paramiko.SSHClient, port: int, uri: str) -> dict:
     try:
-        _exit_status, out, err = _run(client, _build_http_check_script(port, uri))
+        _exit_status, out, err = run_command(client, _build_http_check_script(port, uri))
     except (paramiko.SSHException, OSError) as e:
         return {"reachable": None, "status_code": None, "healthy": None, "detail": f"exec failed: {e}"}
 
@@ -99,7 +89,7 @@ def _http_check(client: paramiko.SSHClient, port: int, uri: str) -> dict:
 
 def _process_check(client: paramiko.SSHClient, application: str) -> dict:
     try:
-        _exit_status, out, err = _run(client, _build_process_check_script(application))
+        _exit_status, out, err = run_command(client, _build_process_check_script(application))
     except (paramiko.SSHException, OSError) as e:
         return {"running": None, "pid": None, "detail": f"exec failed: {e}"}
 
