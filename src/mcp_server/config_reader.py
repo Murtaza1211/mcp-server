@@ -15,13 +15,19 @@ from .ssh import ssh_client
 _FIXED_FILES = ("jvm.options", "server.env", "bootstrap.properties")
 
 # <include location="..."/> references (may point at .xml or .properties files).
-_INCLUDE_RE = re.compile(r'<include\b[^>]*\blocation\s*=\s*"([^"]+)"', re.IGNORECASE)
+# XML attributes may be single- or double-quoted, so match either.
+_INCLUDE_RE = re.compile(r"""<include\b[^>]*\blocation\s*=\s*(?:"([^"]+)"|'([^']+)')""", re.IGNORECASE)
 
-# Any quoted path ending in .properties, e.g. variable/property file references.
-_PROPERTIES_REF_RE = re.compile(r'"([^"]+\.properties)"', re.IGNORECASE)
+# Any quoted path ending in .properties, in any attribute of any tag - e.g. a
+# <variable value="..."/>, a fileset location, etc., not just <include>.
+_PROPERTIES_REF_RE = re.compile(r"""(?:"([^"]+\.properties)"|'([^']+\.properties)')""", re.IGNORECASE)
 
 _VARIABLE_PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}")
 
+# Liberty's built-in ${server.config.dir} variable always equals the server's own
+# config directory - i.e. exactly our app_dir - so it's safe to resolve, unlike
+# arbitrary variables which would need a full Liberty variable-resolution pass.
+_SERVER_CONFIG_DIR_RE = re.compile(r"\$\{server\.config\.dir\}/?", re.IGNORECASE)
 
 @dataclass
 class FileResult:
@@ -32,8 +38,8 @@ class FileResult:
 
 
 def _find_referenced_files(server_xml_text: str) -> set[str]:
-    refs = set(m.group(1) for m in _INCLUDE_RE.finditer(server_xml_text))
-    refs.update(m.group(1) for m in _PROPERTIES_REF_RE.finditer(server_xml_text))
+    refs = set(m.group(1) or m.group(2) for m in _INCLUDE_RE.finditer(server_xml_text))
+    refs.update(m.group(1) or m.group(2) for m in _PROPERTIES_REF_RE.finditer(server_xml_text))
     return refs
 
 
@@ -57,9 +63,12 @@ def _is_dir(sftp: paramiko.SFTPClient, path: PurePosixPath) -> bool:
 
 def _resolve_within(sftp: paramiko.SFTPClient, app_dir_real: str, app_dir: PurePosixPath, ref: str) -> PurePosixPath | None:
     """Resolve a reference relative to app_dir, refusing to leave it. None if unresolvable."""
+    ref = _SERVER_CONFIG_DIR_RE.sub("", ref).lstrip("/")
     if _VARIABLE_PLACEHOLDER_RE.search(ref):
-        # Can't resolve Liberty variable substitutions (e.g. ${server.config.dir}) without
-        # a full variable-resolution pass, so skip rather than guess.
+        # Can't resolve other Liberty variable substitutions (e.g. ${shared.config.dir})
+        # without a full variable-resolution pass, so skip rather than guess.
+        return None
+    if not ref:
         return None
     candidate = app_dir / ref
     try:
