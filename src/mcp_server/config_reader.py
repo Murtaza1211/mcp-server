@@ -4,11 +4,12 @@ import re
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 import paramiko
 
 from .sanitize import sanitize
+from .ssh import ssh_client
 
 # Files every server config is expected to (optionally) have, beyond server.xml itself.
 _FIXED_FILES = ("jvm.options", "server.env", "bootstrap.properties")
@@ -20,9 +21,6 @@ _INCLUDE_RE = re.compile(r'<include\b[^>]*\blocation\s*=\s*"([^"]+)"', re.IGNORE
 _PROPERTIES_REF_RE = re.compile(r'"([^"]+\.properties)"', re.IGNORECASE)
 
 _VARIABLE_PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}")
-
-_SSH_CONNECT_TIMEOUT = 10
-_SSH_PORT = 22
 
 
 @dataclass
@@ -41,32 +39,12 @@ def _find_referenced_files(server_xml_text: str) -> set[str]:
 
 @contextmanager
 def _sftp_session(server_ip: str, os_user: str, ssh_key: str):
-    key_path = Path(ssh_key).expanduser()
-    if not key_path.is_file():
-        raise FileNotFoundError(f"SSH key not found: {key_path}")
-
-    client = paramiko.SSHClient()
-    client.load_system_host_keys()
-    # Strict host key checking disabled: unknown hosts are auto-accepted rather
-    # than requiring a known_hosts entry (equivalent to StrictHostKeyChecking=no).
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(
-            hostname=server_ip,
-            port=_SSH_PORT,
-            username=os_user,
-            key_filename=str(key_path),
-            timeout=_SSH_CONNECT_TIMEOUT,
-            allow_agent=False,
-            look_for_keys=False,
-        )
+    with ssh_client(server_ip, os_user, ssh_key) as client:
         sftp = client.open_sftp()
         try:
             yield sftp
         finally:
             sftp.close()
-    finally:
-        client.close()
 
 
 def _is_dir(sftp: paramiko.SFTPClient, path: PurePosixPath) -> bool:

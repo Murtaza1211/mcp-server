@@ -1,8 +1,8 @@
 # mcp-server
 
-An [MCP](https://modelcontextprotocol.io) server for reading Liberty/WebSphere-style
-application server configuration over SSH, with secrets automatically redacted
-before the content ever reaches an LLM.
+An [MCP](https://modelcontextprotocol.io) server for inspecting IBM Liberty /
+WebSphere-style application servers over SSH — reading config with secrets
+redacted, and checking whether an app is actually up.
 
 ## Tools
 
@@ -65,6 +65,49 @@ itself never flows through the LLM or tool-call history.
 }
 ```
 
+### `health_check`
+
+Connects to a remote server over SSH and reports whether an IBM Liberty app
+is healthy: an HTTP probe plus a process check. Built for locked-down
+targets — assumes a **non-root** SSH user with **no access to root-owned
+paths**, and **no JDK installed**, so it never shells out to `jps`, `jcmd`,
+or `bin/server status`.
+
+**Arguments**
+
+| Name | Type | Description |
+|---|---|---|
+| `server_ip` | string | Hostname or IP address of the server to connect to over SSH. |
+| `os_user` | string | SSH username to authenticate as. |
+| `ssh_key` | string | Path to the private key file (on the machine running this MCP server) used for authentication. |
+| `port` | integer | Local port the application listens on. |
+| `uri` | string | URI path to request for the HTTP health check (e.g. `/health`). |
+| `application` | string | Application/server name to look for among running processes. |
+
+**What it does**
+
+1. Opens one SSH session to `server_ip` as `os_user` and runs two small
+   shell scripts on the remote host (no local files needed, no `sudo`):
+   - **HTTP check**: requests `http://127.0.0.1:<port><uri>` using whichever
+     of `curl`, `wget`, or `python3` is present on the target, in that order.
+     If none are available it reports that rather than guessing.
+   - **Process check**: greps `ps -ef` for a line containing both `java` and
+     `application`, since Liberty runs as a plain JVM process and there's no
+     JDK on the box to ask it directly.
+2. Returns HTTP reachability + status code + a healthy/unhealthy verdict
+   (2xx/3xx counts as healthy), and process running/not-running + PID.
+
+**Example result shape**
+
+```json
+{
+  "server": "10.0.1.25",
+  "application": "myapp",
+  "http": { "reachable": true, "status_code": 200, "healthy": true, "detail": "HTTP 200" },
+  "process": { "running": true, "pid": "25579", "detail": "501 25579 ... java ... myapp ..." }
+}
+```
+
 ## Setup
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
@@ -105,7 +148,7 @@ hermes mcp test server-config-reader
 ```
 
 `hermes mcp test` should report a successful connection and list
-`read_config` as a discovered tool.
+`read_config` and `health_check` as discovered tools.
 
 ### Claude Desktop / other MCP clients
 
@@ -128,8 +171,10 @@ Desktop's `claude_desktop_config.json`:
 ```
 src/mcp_server/
   server.py         MCP tool registration (FastMCP)
-  config_reader.py  Directory walk, file discovery, path-traversal guard
-  sanitize.py        Regex-based secret redaction
+  ssh.py            Shared SSH connection helper (used by every tool)
+  config_reader.py  read_config: file discovery over SFTP, path-traversal guard
+  health_check.py   health_check: HTTP probe + process check over SSH exec
+  sanitize.py       Regex-based secret redaction
 ```
 
 ## Development
@@ -138,6 +183,12 @@ src/mcp_server/
 uv run python -c "
 from mcp_server.config_reader import read_config
 import json
-print(json.dumps(read_config('/path/to/deployments', 'myapp'), indent=2))
+print(json.dumps(read_config('10.0.1.25', 'appuser', '~/.ssh/id_rsa', '/opt/liberty/deployments', 'myapp'), indent=2))
+"
+
+uv run python -c "
+from mcp_server.health_check import check_health
+import json
+print(json.dumps(check_health('10.0.1.25', 'appuser', '~/.ssh/id_rsa', 9080, '/health', 'myapp'), indent=2))
 "
 ```
