@@ -1,46 +1,57 @@
 # mcp-server
 
 An [MCP](https://modelcontextprotocol.io) server for reading Liberty/WebSphere-style
-application server configuration, with secrets automatically redacted before the
-content ever reaches an LLM.
+application server configuration over SSH, with secrets automatically redacted
+before the content ever reaches an LLM.
 
 ## Tools
 
 ### `read_config`
 
-Reads an application's server config and returns it as sanitized text.
+Connects to a remote server over SSH and returns its application config as
+sanitized text.
 
 **Arguments**
 
 | Name | Type | Description |
 |---|---|---|
+| `server_ip` | string | Hostname or IP address of the server to connect to over SSH. |
+| `os_user` | string | SSH username to authenticate as. |
+| `ssh_key` | string | Path to the private key file (on the machine running this MCP server) used for authentication. |
 | `deployment_directory` | string | Base deployment directory containing the application folder. |
 | `application` | string | Name of the application subfolder to read config from. |
 
 **What it does**
 
-1. Looks in `<deployment_directory>/<application>/`.
-2. Reads `server.xml`.
-3. Scans `server.xml` for `<include location="...">` references and any
+1. Opens an SFTP session to `server_ip` as `os_user`, authenticating with
+   `ssh_key`. The target host must already be in the connecting user's
+   `known_hosts` — unknown hosts are rejected rather than silently trusted.
+2. Looks in `<deployment_directory>/<application>/` on that server.
+3. Reads `server.xml`.
+4. Scans `server.xml` for `<include location="...">` references and any
    `*.properties` file references, and reads those too.
-4. Always also reads (if present): `jvm.options`, `server.env`,
+5. Always also reads (if present): `jvm.options`, `server.env`,
    `bootstrap.properties`.
-5. Redacts values associated with sensitive keys — `password`, `secret`,
+6. Redacts values associated with sensitive keys — `password`, `secret`,
    `token`, `apikey`, `credential`, etc. — in both `key=value` style
    (properties files, `.env`, `-D` JVM options) and XML attribute style,
    including Liberty's `<variable name="db.password" value="..."/>` pattern
    where the keyword and the secret live in separate attributes.
-6. Returns a single JSON object with the sanitized content of every file
+7. Returns a single JSON object with the sanitized content of every file
    found (and a not-found/error note for anything missing).
 
 References that would resolve outside the application directory (e.g. path
 traversal via `../../`) or that depend on an unresolved `${variable}` are
 skipped rather than followed.
 
+**Note:** only the SSH key *path* is ever passed to the tool — key material
+itself never flows through the LLM or tool-call history.
+
 **Example result shape**
 
 ```json
 {
+  "server": "10.0.1.25",
   "application_directory": "/opt/liberty/deployments/myapp",
   "files": [
     { "path": "server.xml", "found": true, "content": "..." },
