@@ -18,9 +18,12 @@ _FIXED_FILES = ("jvm.options", "server.env", "bootstrap.properties")
 # XML attributes may be single- or double-quoted, so match either.
 _INCLUDE_RE = re.compile(r"""<include\b[^>]*\blocation\s*=\s*(?:"([^"]+)"|'([^']+)')""", re.IGNORECASE)
 
-# Any quoted path ending in .properties, in any attribute of any tag - e.g. a
-# <variable value="..."/>, a fileset location, etc., not just <include>.
-_PROPERTIES_REF_RE = re.compile(r"""(?:"([^"]+\.properties)"|'([^']+\.properties)')""", re.IGNORECASE)
+# Any path ending in .properties, in any attribute of any tag - e.g. a
+# <variable value="..."/>, a fileset location, etc., not just <include> - or as
+# an element's text content, e.g. <applicationArgument>app.properties</applicationArgument>.
+_PROPERTIES_REF_RE = re.compile(
+    r"""(?:"([^"]+\.properties)"|'([^']+\.properties)'|>\s*([^\s<>]+\.properties)\s*<)""", re.IGNORECASE
+)
 
 _VARIABLE_PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}")
 
@@ -39,7 +42,7 @@ class FileResult:
 
 def _find_referenced_files(server_xml_text: str) -> set[str]:
     refs = set(m.group(1) or m.group(2) for m in _INCLUDE_RE.finditer(server_xml_text))
-    refs.update(m.group(1) or m.group(2) for m in _PROPERTIES_REF_RE.finditer(server_xml_text))
+    refs.update(m.group(1) or m.group(2) or m.group(3) for m in _PROPERTIES_REF_RE.finditer(server_xml_text))
     return refs
 
 
