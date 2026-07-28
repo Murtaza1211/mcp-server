@@ -32,6 +32,19 @@ _MAX_AUTO_FILES = 300
 _MAX_AUTO_FILE_SIZE = 25 * 1024 * 1024  # skip huge files (e.g. trace.log) unless explicitly requested
 _MAX_MATCH_BLOCKS = 200
 _CONTEXT_LINES = 2
+# Files are grepped in batches of this size, all within a single SSH exec
+# round-trip per batch, instead of one round-trip per file. Batching (rather
+# than one giant command for every target) keeps the remote command line to a
+# sane length and bounds how long any single exec call can take.
+_BATCH_SIZE = 50
+# Base + per-file timeout budget (seconds) for a batched grep exec call.
+_BATCH_TIMEOUT_BASE = 15
+_BATCH_TIMEOUT_PER_FILE = 2
+
+# Marker emitted before each file's grep output in a batched command, so the
+# combined stdout can be split back into per-file chunks client-side. Uses
+# \x01 (SOH), which is vanishingly unlikely to appear in real log content.
+_BATCH_MARKER_RE = re.compile(r"\x01\x01F(\d+)\x01\x01\n?")
 
 # Liberty's default basic-format timestamp: [7/28/26 0:15:32:123 UTC] (comma after date optional).
 _LIBERTY_BASIC_TS_RE = re.compile(
@@ -148,9 +161,32 @@ def _resolve_log_file(logs_dir: PurePosixPath, rel: str) -> PurePosixPath | None
     return PurePosixPath(candidate)
 
 
-def _build_grep_command(path: PurePosixPath, search: list[str]) -> str:
+def _build_batch_grep_command(paths: list[PurePosixPath], search: list[str]) -> str:
+    """Build a single remote command that greps every path in `paths` and
+    prints a unique marker before each file's output, so one SSH exec call
+    can cover many files instead of one exec call per file.
+    """
     terms = " ".join(f"-e {shlex.quote(term)}" for term in search)
-    return f"grep -n -i -a -F -C {_CONTEXT_LINES} {terms} -- {shlex.quote(str(path))} 2>/dev/null"
+    parts = []
+    for i, path in enumerate(paths):
+        parts.append(f"printf '\\1\\1F{i}\\1\\1\\n'")
+        parts.append(f"grep -n -i -a -F -C {_CONTEXT_LINES} {terms} -- {shlex.quote(str(path))} 2>/dev/null")
+    return " ; ".join(parts)
+
+
+def _split_batch_output(raw: str, n: int) -> list[str]:
+    """Split the combined stdout of _build_batch_grep_command back into one
+    chunk per input file, in the same order the paths were given.
+    """
+    outputs = [""] * n
+    matches = list(_BATCH_MARKER_RE.finditer(raw))
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        file_idx = int(m.group(1))
+        if 0 <= file_idx < n:
+            outputs[file_idx] = raw[start:end]
+    return outputs
 
 
 def _split_blocks(grep_output: str) -> list[list[str]]:
@@ -261,29 +297,39 @@ def analyze_logs(
             results = []
             truncated = False
             total_blocks = 0
-            for rel, abs_path in targets:
+            for batch_start in range(0, len(targets), _BATCH_SIZE):
                 if total_blocks >= _MAX_MATCH_BLOCKS:
                     truncated = True
                     break
-                _exit_status, out, _err = run_command(client, _build_grep_command(abs_path, search))
-                for block in _split_blocks(out):
+                batch = targets[batch_start : batch_start + _BATCH_SIZE]
+                batch_paths = [abs_path for _rel, abs_path in batch]
+                batch_cmd = _build_batch_grep_command(batch_paths, search)
+                batch_timeout = _BATCH_TIMEOUT_BASE + _BATCH_TIMEOUT_PER_FILE * len(batch)
+                _exit_status, out, _err = run_command(client, batch_cmd, timeout=batch_timeout)
+                per_file_output = _split_batch_output(out, len(batch))
+
+                for (rel, _abs_path), file_out in zip(batch, per_file_output):
                     if total_blocks >= _MAX_MATCH_BLOCKS:
                         truncated = True
                         break
-                    ts = _block_timestamp(block)
-                    if ts is not None:
-                        if start_dt and ts < start_dt:
-                            continue
-                        if end_dt and ts > end_dt:
-                            continue
-                    results.append(
-                        {
-                            "file": rel,
-                            "timestamp": ts.isoformat() if ts else None,
-                            "lines": block,
-                        }
-                    )
-                    total_blocks += 1
+                    for block in _split_blocks(file_out):
+                        if total_blocks >= _MAX_MATCH_BLOCKS:
+                            truncated = True
+                            break
+                        ts = _block_timestamp(block)
+                        if ts is not None:
+                            if start_dt and ts < start_dt:
+                                continue
+                            if end_dt and ts > end_dt:
+                                continue
+                        results.append(
+                            {
+                                "file": rel,
+                                "timestamp": ts.isoformat() if ts else None,
+                                "lines": block,
+                            }
+                        )
+                        total_blocks += 1
     except paramiko.AuthenticationException as e:
         return {"server": server_ip, "logs_directory": str(logs_dir), "error": f"SSH authentication failed: {e}", "results": []}
     except (paramiko.SSHException, OSError, FileNotFoundError) as e:
