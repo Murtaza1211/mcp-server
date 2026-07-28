@@ -42,31 +42,92 @@ def _parse_target(raw: str) -> tuple[str, int] | None:
 
 
 def _build_target_script(host: str, port: int, index: int) -> str:
-    """Remote bash snippet for one target: resolve DNS (IPv4 only), then
-    probe every resolved address independently rather than letting the
-    shell's own hostname resolution silently pick just one.
+    """Remote bash snippet for one target: resolve DNS (IPv4 only, skipped
+    entirely for literal-IP targets), then probe every resolved address
+    independently and in parallel.
+
+    Literal IPs bypass DNS completely rather than calling getent on them:
+    getent hosts on an IP does a *reverse* (PTR) lookup, not a no-op - in
+    environments where reverse DNS isn't maintained (common; forward zones
+    get more upkeep than reverse ones), that reverse lookup can be slow or
+    fail outright, for a question ("is this reachable") that never needed
+    resolution in the first place.
+
+    Each resolved address is probed with a Python socket connect+settimeout
+    when python3 is available, since `timeout N bash -c "echo > /dev/tcp/..."`
+    doesn't reliably enforce its timeout when a connection is silently
+    dropped (no RST/ICMP) rather than actively refused - the outer `timeout`
+    sends SIGTERM expecting to interrupt a blocked connect() syscall, but the
+    shell can ride out the OS's own SYN-retry timeout instead, which is far
+    longer. Falls back to the bash /dev/tcp approach only if python3 isn't
+    present, matching how health_check.py already falls back between
+    curl/wget/python3 for its HTTP probe.
+
+    Probes for all resolved addresses of one target run in parallel
+    (backgrounded, collected via `wait`), not sequentially - the difference
+    between paying the sum of every address's timeout vs. just the slowest
+    one.
     """
-    host_q = shlex.quote(host)
+    if _IPV4_RE.match(host):
+        # Literal IP target: no DNS step at all, forward or reverse.
+        resolve_block = f'ips="{host}"'
+    else:
+        host_q = shlex.quote(host)
+        resolve_block = (
+            f"ips=$(timeout 5 getent hosts {host_q} 2>/dev/null | awk '{{print $1}}' "
+            r"| grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u)"
+        )
+
+    probe_snippet = f'''python3 - "$ip" {port} <<'PYEOF' 2>/dev/null
+import socket, sys
+ip, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout({_TCP_PROBE_TIMEOUT})
+try:
+    s.connect((ip, port))
+    print("connected")
+except socket.timeout:
+    print("timeout")
+except ConnectionRefusedError:
+    print("refused")
+except OSError:
+    print("unreachable")
+finally:
+    s.close()
+PYEOF
+'''
+
     return f"""
 printf '\\1\\1T{index}\\1\\1\\n'
-ips=$(getent hosts {host_q} 2>/dev/null | awk '{{print $1}}' | grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$' | sort -u)
+{resolve_block}
 if [ -z "$ips" ]; then
   echo "DNS_FAILED"
 else
+  tmp_{index}=$(mktemp)
   for ip in $ips; do
-    err=$(timeout {_TCP_PROBE_TIMEOUT} bash -c "echo > /dev/tcp/$ip/{port}" 2>&1 >/dev/null)
-    rc=$?
-    if [ $rc -eq 0 ]; then
-      status=connected
-    elif [ $rc -eq 124 ]; then
-      status=timeout
-    elif echo "$err" | grep -qi refused; then
-      status=refused
-    else
-      status=unreachable
-    fi
-    echo "$status $ip"
+    (
+      if command -v python3 >/dev/null 2>&1; then
+        result=$({probe_snippet})
+        [ -z "$result" ] && result=unreachable
+      else
+        err=$(timeout {_TCP_PROBE_TIMEOUT} bash -c "echo > /dev/tcp/$ip/{port}" 2>&1 >/dev/null)
+        rc=$?
+        if [ $rc -eq 0 ]; then
+          result=connected
+        elif [ $rc -eq 124 ]; then
+          result=timeout
+        elif echo "$err" | grep -qi refused; then
+          result=refused
+        else
+          result=unreachable
+        fi
+      fi
+      echo "$result $ip" >> "$tmp_{index}"
+    ) &
   done
+  wait
+  cat "$tmp_{index}"
+  rm -f "$tmp_{index}"
 fi
 """.strip()
 
