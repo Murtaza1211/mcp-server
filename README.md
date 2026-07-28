@@ -2,7 +2,8 @@
 
 An [MCP](https://modelcontextprotocol.io) server for inspecting IBM Liberty /
 WebSphere-style application servers over SSH — reading config with secrets
-redacted, checking whether an app is actually up, and searching its logs.
+redacted, checking whether an app is actually up, searching its logs, and
+checking outward connectivity and on-box resource pressure for triage.
 
 ## Tools
 
@@ -13,13 +14,13 @@ sanitized text.
 
 **Arguments**
 
-| Name | Type | Description |
-|---|---|---|
-| `server_ip` | string | Hostname or IP address of the server to connect to over SSH. |
-| `os_user` | string | SSH username to authenticate as. |
-| `ssh_key` | string | Path to the private key file (on the machine running this MCP server) used for authentication. |
-| `deployment_directory` | string | Base deployment directory containing the application folder. |
-| `application` | string | Name of the application subfolder to read config from. |
+| Name                   | Type   | Description                                                                                    |
+| ---------------------- | ------ | ------------------------------------------------------------------------------------------------ |
+| `server_ip`            | string | Hostname or IP address of the server to connect to over SSH.                                   |
+| `os_user`              | string | SSH username to authenticate as.                                                                |
+| `ssh_key`              | string | Path to the private key file (on the machine running this MCP server) used for authentication. |
+| `deployment_directory` | string | Base deployment directory containing the application folder.                                   |
+| `application`          | string | Name of the application subfolder to read config from.                                         |
 
 **What it does**
 
@@ -75,14 +76,14 @@ or `bin/server status`.
 
 **Arguments**
 
-| Name | Type | Description |
-|---|---|---|
-| `server_ip` | string | Hostname or IP address of the server to connect to over SSH. |
-| `os_user` | string | SSH username to authenticate as. |
-| `ssh_key` | string | Path to the private key file (on the machine running this MCP server) used for authentication. |
-| `port` | integer | Local port the application listens on. |
-| `uri` | string | URI path to request for the HTTP health check (e.g. `/health`). |
-| `application` | string | Application/server name to look for among running processes. |
+| Name          | Type    | Description                                                                                    |
+| ------------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `server_ip`   | string  | Hostname or IP address of the server to connect to over SSH.                                   |
+| `os_user`     | string  | SSH username to authenticate as.                                                                |
+| `ssh_key`     | string  | Path to the private key file (on the machine running this MCP server) used for authentication. |
+| `port`        | integer | Local port the application listens on.                                                          |
+| `uri`         | string  | URI path to request for the HTTP health check (e.g. `/health`).                                |
+| `application` | string  | Application/server name to look for among running processes.                                    |
 
 **What it does**
 
@@ -111,21 +112,21 @@ or `bin/server status`.
 ### `list_logs`
 
 Connects over SSH and enumerates every file under
-`<deployment_directory>/<application>/logs/` — Liberty's own `messages.log`,
-`console.log`, `trace.log`, `ffdc/*`, plus whatever an application itself
-writes into subdirectories there. Meant to be called before `analyze_logs`
-so an LLM can pick which files are actually relevant instead of blindly
-grepping everything (`trace.log` especially can be huge).
+`<deployment_directory>/<application>/logs/` — Liberty's own
+`messages.log`, `console.log`, `trace.log`, `ffdc/*`, plus whatever an
+application itself writes into subdirectories there. Meant to be called
+before `analyze_logs` so an LLM can pick which files are actually relevant
+instead of blindly grepping everything (`trace.log` especially can be huge).
 
 **Arguments**
 
-| Name | Type | Description |
-|---|---|---|
-| `server_ip` | string | Hostname or IP address of the server to connect to over SSH. |
-| `os_user` | string | SSH username to authenticate as. |
-| `ssh_key` | string | Path to the private key file (on the machine running this MCP server) used for authentication. |
-| `deployment_directory` | string | Base deployment directory containing the application folder. |
-| `application` | string | Name of the application subfolder whose `logs/` directory to list. |
+| Name                   | Type   | Description                                                                                    |
+| ---------------------- | ------ | ------------------------------------------------------------------------------------------------ |
+| `server_ip`            | string | Hostname or IP address of the server to connect to over SSH.                                   |
+| `os_user`              | string | SSH username to authenticate as.                                                                |
+| `ssh_key`              | string | Path to the private key file (on the machine running this MCP server) used for authentication. |
+| `deployment_directory` | string | Base deployment directory containing the application folder.                                   |
+| `application`          | string | Name of the application subfolder whose `logs/` directory to list.                              |
 
 **Example result shape**
 
@@ -149,17 +150,17 @@ names, returning matches with surrounding context.
 
 **Arguments**
 
-| Name | Type | Description |
-|---|---|---|
-| `server_ip` | string | Hostname or IP address of the server to connect to over SSH. |
-| `os_user` | string | SSH username to authenticate as. |
-| `ssh_key` | string | Path to the private key file (on the machine running this MCP server) used for authentication. |
-| `deployment_directory` | string | Base deployment directory containing the application folder. |
-| `application` | string | Name of the application subfolder whose `logs/` directory to search. |
-| `search` | list of strings | Strings or exception names to search for (case-insensitive, literal match). |
-| `start_time` | string, optional | ISO-8601 timestamp; matches before this are excluded when a timestamp is detected. |
-| `end_time` | string, optional | ISO-8601 timestamp; matches after this are excluded when a timestamp is detected. |
-| `log_files` | list of strings, optional | Paths relative to `logs/`, as returned by `list_logs`, to restrict the search to. If omitted, every discovered file is searched, skipping any over ~25MB. |
+| Name                   | Type                      | Description                                                                                                                                                |
+| ---------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `server_ip`            | string                    | Hostname or IP address of the server to connect to over SSH.                                                                                              |
+| `os_user`              | string                    | SSH username to authenticate as.                                                                                                                          |
+| `ssh_key`              | string                    | Path to the private key file (on the machine running this MCP server) used for authentication.                                                            |
+| `deployment_directory` | string                    | Base deployment directory containing the application folder.                                                                                              |
+| `application`          | string                    | Name of the application subfolder whose `logs/` directory to search.                                                                                      |
+| `search`               | list of strings           | Strings or exception names to search for (case-insensitive, literal match).                                                                               |
+| `start_time`           | string, optional          | ISO-8601 timestamp; matches before this are excluded when a timestamp is detected.                                                                        |
+| `end_time`             | string, optional          | ISO-8601 timestamp; matches after this are excluded when a timestamp is detected.                                                                         |
+| `log_files`            | list of strings, optional | Paths relative to `logs/`, as returned by `list_logs`, to restrict the search to. If omitted, every discovered file is searched, skipping any over ~25MB. |
 
 **What it does**
 
@@ -170,8 +171,13 @@ names, returning matches with surrounding context.
 2. If `start_time` is given, skips whole files whose last-modified time
    predates it (log files are append-only, so an untouched-since-`start_time`
    file can't contain anything newer).
-3. Runs `grep -n -i -a -F -C 2` per file for the given terms and groups
-   matches into context blocks.
+3. Greps the target files for the given terms and groups matches into
+   context blocks. **Files are searched in batches of up to 50 per SSH exec
+   call** (one remote command greps every file in the batch, with an
+   internal marker separating each file's output) rather than one exec call
+   per file — this cuts SSH round-trips from roughly *N+2* down to roughly
+   *⌈N/50⌉+2* for a directory of *N* log files, which matters most for the
+   unscoped default search across many files.
 4. For each block, tries to find a timestamp — Liberty's basic format
    (`[7/28/26 0:15:32:123 UTC]`), Liberty's JSON format (`"ibm_datetime"`),
    or generic ISO-8601 for arbitrary app logs — anchored on the actually
@@ -201,6 +207,165 @@ names, returning matches with surrounding context.
   ],
   "truncated": false,
   "skipped_files": []
+}
+```
+
+### `check_connectivity`
+
+Connects over SSH and, for each `host:port` dependency target, resolves DNS
+and probes TCP reachability — the practical, non-root substitute for a
+firewall-rule dump (inspecting actual `iptables`/`firewalld` rules would
+need privileges these deployments don't have; a connect attempt reports
+almost everything a rule dump would for triage purposes: reachable, refused,
+or timed out).
+
+**Arguments**
+
+| Name        | Type             | Description                                                                                                     |
+| ----------- | ---------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `server_ip` | string           | Hostname or IP address of the server to connect to over SSH.                                                    |
+| `os_user`   | string           | SSH username to authenticate as.                                                                                |
+| `ssh_key`   | string           | Path to the private key file (on the machine running this MCP server) used for authentication.                 |
+| `targets`   | list of strings  | `"host:port"` entries for the dependencies to check (e.g. DB or LDAP hosts referenced in the app's config, as returned by `read_config`). Max 50 per call. |
+
+**What it does**
+
+1. Targets are supplied explicitly by the caller rather than auto-discovered
+   from config — parsing every hostname out of `server.xml`/datasource
+   URLs/JVM options reliably would need meaningfully more logic (variable
+   resolution, JDBC/endpoint URL parsing), and a *missed* dependency here is
+   worse than a missed log line: overlooking the one host that's actually
+   down during an incident is worse than a slightly less convenient tool.
+2. For each target, resolves DNS via `getent hosts` (no root required, no
+   dependency on `dig`/`nslookup` being installed) and filters to IPv4
+   addresses only (these deployments are IPv4-only).
+3. **If a hostname resolves to more than one IP** — common for active-active
+   DB replicas, LDAP pairs, or load-balanced backends — **every address is
+   probed individually**, never just the hostname. Letting the shell resolve
+   the hostname itself would silently pick one address and could report a
+   dependency as fully healthy while one backend is actually down behind a
+   healthy one.
+4. Each address gets a TCP connect attempt (`/dev/tcp/<ip>/<port>` via bash,
+   no `nc`/`telnet` dependency) with a 3-second timeout, distinguishing
+   `connected` / `refused` / `timeout` / `unreachable`.
+5. All targets are checked within a single SSH exec call (same round-trip
+   reasoning as the `analyze_logs` batching).
+
+Reports two rollup fields per target because they answer different
+questions: **`reachable`** (true if *at least one* resolved address answers
+— "can the app get through at all") and **`fully_reachable`** (true only if
+*every* resolved address answers — "is a backend silently down behind a
+healthy one").
+
+**Example result shape**
+
+```json
+{
+  "server": "10.0.1.25",
+  "results": [
+    {
+      "target": "db-primary.internal:5432",
+      "resolved": true,
+      "addresses": [
+        { "ip": "10.0.2.10", "reachable": true, "detail": "connected" },
+        { "ip": "10.0.2.11", "reachable": false, "detail": "refused" }
+      ],
+      "reachable": true,
+      "fully_reachable": false
+    },
+    {
+      "target": "ldap.corp.example:636",
+      "resolved": false,
+      "addresses": [],
+      "reachable": false,
+      "fully_reachable": false
+    }
+  ],
+  "malformed_targets": []
+}
+```
+
+### `check_resources`
+
+Connects over SSH and checks disk, memory, and file-descriptor pressure on
+the box — root-cause categories that often produce log lines which look
+like an unrelated app bug (a `NullPointerException` three layers deep in
+application code can be the downstream symptom of a full disk or an
+exhausted fd table).
+
+**Arguments**
+
+| Name                   | Type   | Description                                                                                                                        |
+| ---------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `server_ip`            | string | Hostname or IP address of the server to connect to over SSH.                                                                       |
+| `os_user`              | string | SSH username to authenticate as.                                                                                                    |
+| `ssh_key`              | string | Path to the private key file (on the machine running this MCP server) used for authentication.                                     |
+| `deployment_directory` | string | Base deployment directory containing the application folder.                                                                        |
+| `application`          | string | Name of the application subfolder (also used to find its process among running processes, same `ps -ef` approach as `health_check`). |
+
+**What it does**
+
+1. **Disk** — checked for exactly three filesystems, not every mounted one:
+   the filesystem holding `<deployment_directory>/<application>` (where
+   logs/FFDC/work files actually get written), `/tmp` (where the JVM writes
+   temp files by default), and `/` (root — a cheap sanity check if it's a
+   distinct filesystem from the other two). Enumerating every mount would
+   add noise from filesystems irrelevant to this app; if two of the three
+   checks land on the same filesystem, that's visible from matching
+   `mounted_on` values rather than hidden. Each check reports both **space**
+   (`df -Pk`) and **inode** (`df -Pi`) usage — a full inode table can block
+   writes well before the disk is out of bytes (FFDC directories dump one
+   file per failure and can exhaust inodes long before space runs low).
+2. **Memory** — `free -m` (falling back to `/proc/meminfo` if `free` isn't
+   present), reporting total/used/free/available plus swap.
+3. **Process** — finds the app's PID via the same `ps -ef` grep
+   `health_check` uses, then reports its open file descriptor count
+   (`/proc/<pid>/fd`) against its ulimit (`/proc/<pid>/limits`) — "too many
+   open files" is one of the most common real-world Liberty production
+   failures.
+4. All of the above runs within a single SSH exec call.
+
+**Example result shape**
+
+```json
+{
+  "server": "10.0.1.25",
+  "deployment_path_checked": "/opt/liberty/deployments/myapp",
+  "disk": {
+    "deployment": {
+      "available": true,
+      "filesystem": "/dev/sda1",
+      "mounted_on": "/opt",
+      "total_mb": 40968.0,
+      "used_mb": 12065.0,
+      "available_mb": 26100.0,
+      "used_pct": 32,
+      "total_inodes": 2621440,
+      "used_inodes": 123456,
+      "available_inodes": 2497984,
+      "inode_used_pct": 5
+    },
+    "tmp": { "available": true, "mounted_on": "/", "used_pct": 47, "inode_used_pct": 2 },
+    "root": { "available": true, "mounted_on": "/", "used_pct": 47, "inode_used_pct": 2 }
+  },
+  "memory": {
+    "total_mb": 7982,
+    "used_mb": 1234,
+    "free_mb": 2048,
+    "available_mb": 6500,
+    "swap_total_mb": 2047,
+    "swap_used_mb": 0,
+    "swap_free_mb": 2047,
+    "source": "free"
+  },
+  "process": {
+    "found": true,
+    "pid": "25579",
+    "open_file_descriptors": 412,
+    "fd_soft_limit": 4096,
+    "fd_hard_limit": 4096,
+    "fd_usage_pct": 10.1
+  }
 }
 ```
 
@@ -244,8 +409,8 @@ hermes mcp test server-config-reader
 ```
 
 `hermes mcp test` should report a successful connection and list
-`read_config`, `health_check`, `list_logs`, and `analyze_logs` as discovered
-tools.
+`read_config`, `health_check`, `list_logs`, `analyze_logs`,
+`check_connectivity`, and `check_resources` as discovered tools.
 
 ### Claude Desktop / other MCP clients
 
@@ -271,7 +436,9 @@ src/mcp_server/
   ssh.py            Shared SSH connection helper (used by every tool)
   config_reader.py  read_config: file discovery over SFTP, path-traversal guard
   health_check.py   health_check: HTTP probe + process check over SSH exec
-  logs.py           list_logs / analyze_logs: log discovery + grep with time filtering
+  logs.py           list_logs / analyze_logs: log discovery + batched grep with time filtering
+  connectivity.py   check_connectivity: DNS resolution (multi-IP aware) + TCP reachability probes
+  resources.py      check_resources: disk/inode, memory/swap, and fd-vs-ulimit checks
   sanitize.py       Regex-based secret redaction
 ```
 
@@ -295,5 +462,17 @@ from mcp_server.logs import list_logs, analyze_logs
 import json
 print(json.dumps(list_logs('10.0.1.25', 'appuser', '~/.ssh/id_rsa', '/opt/liberty/deployments', 'myapp'), indent=2))
 print(json.dumps(analyze_logs('10.0.1.25', 'appuser', '~/.ssh/id_rsa', '/opt/liberty/deployments', 'myapp', ['NullPointerException']), indent=2))
+"
+
+uv run python -c "
+from mcp_server.connectivity import check_connectivity
+import json
+print(json.dumps(check_connectivity('10.0.1.25', 'appuser', '~/.ssh/id_rsa', ['db-primary.internal:5432', 'ldap.corp.example:636']), indent=2))
+"
+
+uv run python -c "
+from mcp_server.resources import check_resources
+import json
+print(json.dumps(check_resources('10.0.1.25', 'appuser', '~/.ssh/id_rsa', '/opt/liberty/deployments', 'myapp'), indent=2))
 "
 ```
