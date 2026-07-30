@@ -5,6 +5,7 @@ from .connectivity import check_connectivity as _check_connectivity
 from .health_check import check_health as _check_health
 from .logs import analyze_logs as _analyze_logs
 from .logs import list_logs as _list_logs
+from .logs import scan_errors as _scan_errors
 from .resources import check_resources as _check_resources
 
 mcp = FastMCP("mcp-server")
@@ -98,6 +99,54 @@ def analyze_logs(
     """
     return _analyze_logs(
         server_ip, os_user, ssh_key, deployment_directory, application, search, start_time, end_time, log_files
+    )
+
+
+@mcp.tool()
+def scan_errors(
+    server_ip: str,
+    os_user: str,
+    ssh_key: str,
+    deployment_directory: str,
+    application: str,
+    log_files: list[str] | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    patterns: list[str] | None = None,
+    include_context: bool = False,
+) -> dict:
+    """SSH to a server and scan the app's logs for exceptions/errors, returning a
+    grouped summary per distinct error (identifier, count, first/last seen, one
+    sample line) instead of every raw match. Meant as a cheap first pass to run
+    before analyze_logs - call this to see what error signatures exist and how
+    often, then call analyze_logs with the specific term(s) worth a full look at
+    full context for.
+
+    By default matches both fully-qualified Java exception/error class names
+    (e.g. java.lang.NullPointerException) and Liberty's own E/W-severity message
+    codes (e.g. SRVE0777E, CWWKG0033W) - many real Liberty failures never throw a
+    Java exception at all and only ever show up as a message code, so message IDs
+    are included by default rather than treated as optional.
+
+    Args:
+        server_ip: Hostname or IP address of the server to connect to over SSH.
+        os_user: SSH username to authenticate as.
+        ssh_key: Path to the private key file (on this machine) used for authentication.
+        deployment_directory: Base deployment directory containing the application folder.
+        application: Name of the application subfolder whose logs/ directory to scan.
+        log_files: Optional list of paths (relative to logs/, as returned by list_logs) to
+            restrict the scan to. If omitted, every discovered file is scanned (skipping
+            any over ~25MB, reported under skipped_files).
+        start_time: Optional ISO-8601 timestamp; matches before this are excluded when detectable.
+        end_time: Optional ISO-8601 timestamp; matches after this are excluded when detectable.
+        patterns: Optional list of extended-regex patterns that REPLACES the default
+            exception/message-ID pattern set entirely, to scan for something else.
+        include_context: If true, include a few lines of context around one sample
+            occurrence of each distinct error, not just the single matched line.
+    """
+    return _scan_errors(
+        server_ip, os_user, ssh_key, deployment_directory, application,
+        log_files, start_time, end_time, patterns, include_context,
     )
 
 

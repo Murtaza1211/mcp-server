@@ -199,29 +199,82 @@ def _split_blocks(grep_output: str) -> list[list[str]]:
     return [b for b in blocks if b]
 
 
+# Default patterns for scan_errors(): fully-qualified Java exception/error
+# class names (java.lang.NullPointerException, com.example.MyException, ...)
+# and Liberty's own severity-coded message IDs (SRVE0777E, CWWKG0033W, ...).
+# Message IDs matter as much as exception class names here - many real
+# Liberty failures (a full disk, a listener that failed to start, a config
+# error) never throw a Java exception at all, they only ever appear as an
+# E/W-severity message code. Restricted to E (error) and W (warning) by
+# default to skip informational/audit codes.
+_DEFAULT_EXCEPTION_PATTERN = r"\b([a-zA-Z][a-zA-Z0-9_]*\.)+[A-Z][A-Za-z0-9_$]*(Exception|Error)\b"
+_DEFAULT_MSGID_PATTERN = r"\b[A-Z]{2,10}[0-9]{4,5}[EW]\b"
+
+_SCAN_EXCEPTION_RE = re.compile(_DEFAULT_EXCEPTION_PATTERN)
+_SCAN_MSGID_RE = re.compile(_DEFAULT_MSGID_PATTERN)
+
+
+def _build_batch_scan_command(paths: list[PurePosixPath], patterns: list[str]) -> str:
+    """Like _build_batch_grep_command, but for extended-regex error/exception
+    patterns instead of literal search terms.
+    """
+    terms = " ".join(f"-e {shlex.quote(p)}" for p in patterns)
+    parts = []
+    for i, path in enumerate(paths):
+        parts.append(f"printf '\\1\\1F{i}\\1\\1\\n'")
+        parts.append(f"grep -n -a -E -C {_CONTEXT_LINES} {terms} -- {shlex.quote(str(path))} 2>/dev/null")
+    return " ; ".join(parts)
+
+
+def _identify_error(matched_line: str, exception_re: re.Pattern, msgid_re: re.Pattern) -> tuple[str, str] | None:
+    """Return (identifier, type) for the first exception class name or
+    message ID found in a matched line, exception class taking priority
+    since it's the more specific signal when both are present.
+    """
+    m = exception_re.search(matched_line)
+    if m:
+        return m.group(0), "exception"
+    m = msgid_re.search(matched_line)
+    if m:
+        return m.group(0), "message_id"
+    return None
+
+
 # grep -n prefixes matched lines "N:content" and context lines "N-content".
 _GREP_LINE_RE = re.compile(r"^(\d+)([:\-])(.*)$", re.DOTALL)
 
 
-def _block_timestamp(block: list[str]) -> datetime | None:
-    """Best-effort timestamp for a grep context block: prefer the matched line itself,
-    then walk backwards through preceding context (closest first, since stack-trace/
-    continuation lines belong to the nearest earlier timestamped header), then forwards.
-    """
+def _parse_grep_block(block: list[str]) -> list[tuple[bool, str]]:
+    """Parse a grep -n block's lines into (is_matched_line, text) pairs."""
     parsed = []
     for line in block:
         m = _GREP_LINE_RE.match(line)
         parsed.append((m.group(2) == ":", m.group(3)) if m else (False, line))
+    return parsed
 
-    match_indices = [i for i, (is_match, _) in enumerate(parsed) if is_match]
-    anchor = match_indices[0] if match_indices else 0
 
+def _nearest_timestamp(parsed: list[tuple[bool, str]], anchor: int) -> datetime | None:
+    """Best-effort timestamp nearest to `anchor` in a parsed block: the anchor
+    line itself, then preceding lines (closest first, since stack-trace/
+    continuation lines belong to the nearest earlier timestamped header),
+    then following lines.
+    """
     order = [anchor, *range(anchor - 1, -1, -1), *range(anchor + 1, len(parsed))]
     for idx in order:
         ts = _extract_timestamp(parsed[idx][1])
         if ts is not None:
             return ts
     return None
+
+
+def _block_timestamp(block: list[str]) -> datetime | None:
+    """Best-effort timestamp for a grep context block: anchored on the
+    block's first matched line (see _nearest_timestamp).
+    """
+    parsed = _parse_grep_block(block)
+    match_indices = [i for i, (is_match, _) in enumerate(parsed) if is_match]
+    anchor = match_indices[0] if match_indices else 0
+    return _nearest_timestamp(parsed, anchor)
 
 
 def analyze_logs(
@@ -340,6 +393,207 @@ def analyze_logs(
         "logs_directory": str(logs_dir),
         "search": search,
         "results": results,
+        "truncated": truncated,
+        "skipped_files": skipped,
+    }
+
+
+_MAX_SCAN_BLOCKS = 200
+
+
+def scan_errors(
+    server_ip: str,
+    os_user: str,
+    ssh_key: str,
+    deployment_directory: str,
+    application: str,
+    log_files: list[str] | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    patterns: list[str] | None = None,
+    include_context: bool = False,
+) -> dict:
+    """SSH to server_ip and scan the app's logs for exceptions/errors, returning a
+    grouped summary (identifier, count, first/last seen, one sample line) instead of
+    every raw match - meant as a cheap first pass an LLM can use to decide what's worth
+    a full analyze_logs() call, rather than reading full context for every occurrence.
+
+    By default matches both fully-qualified Java exception/error class names (e.g.
+    java.lang.NullPointerException) and Liberty's own E/W-severity message codes (e.g.
+    SRVE0777E, CWWKG0033W) - many real Liberty failures (full disk, a listener that
+    failed to start, a config problem) only ever show up as a message code, never as a
+    Java exception, so message IDs are included by default rather than treated as a
+    secondary/optional signal.
+
+    Pass `patterns` (a list of extended-regex patterns) to replace the default pattern
+    set entirely - e.g. to scan for something else altogether, or to narrow to a
+    specific exception family.
+
+    Like analyze_logs: batches files (up to 50 per SSH exec call), applies the same
+    best-effort time-window filtering (a block is only dropped when a timestamp was
+    found and falls outside [start_time, end_time]; unparseable blocks are kept), and
+    caps total matched blocks at 200 - if truncated, reported counts are a lower bound,
+    not exact.
+    """
+    logs_dir = PurePosixPath(deployment_directory) / application / "logs"
+
+    scan_patterns = patterns if patterns else [_DEFAULT_EXCEPTION_PATTERN, _DEFAULT_MSGID_PATTERN]
+    # If the caller supplied custom patterns, identify matches using those same
+    # patterns (compiled), rather than the default exception/message-id split.
+    if patterns:
+        try:
+            compiled_patterns = [re.compile(p) for p in patterns]
+        except re.error as e:
+            return {"server": server_ip, "logs_directory": str(logs_dir), "error": f"invalid pattern: {e}"}
+
+        def identify(matched_line: str) -> tuple[str, str] | None:
+            for cp in compiled_patterns:
+                m = cp.search(matched_line)
+                if m:
+                    return m.group(0), "custom"
+            return None
+    else:
+        def identify(matched_line: str) -> tuple[str, str] | None:
+            return _identify_error(matched_line, _SCAN_EXCEPTION_RE, _SCAN_MSGID_RE)
+
+    try:
+        start_dt = _parse_time_arg(start_time)
+        end_dt = _parse_time_arg(end_time)
+    except ValueError as e:
+        return {"server": server_ip, "logs_directory": str(logs_dir), "error": f"invalid start_time/end_time: {e}"}
+
+    try:
+        with ssh_client(server_ip, os_user, ssh_key) as client:
+            if not _remote_is_dir(client, logs_dir):
+                return {
+                    "server": server_ip,
+                    "logs_directory": str(logs_dir),
+                    "error": f"logs directory not found on {server_ip}: {logs_dir}",
+                    "errors": [],
+                }
+
+            all_files = _list_files(client, logs_dir)
+
+            skipped: list[dict] = []
+            if log_files:
+                targets = []
+                for rel in log_files:
+                    resolved = _resolve_log_file(logs_dir, rel)
+                    if resolved is None:
+                        skipped.append({"path": rel, "reason": "outside logs directory"})
+                        continue
+                    targets.append((rel, resolved))
+            else:
+                if len(all_files) > _MAX_AUTO_FILES:
+                    return {
+                        "server": server_ip,
+                        "logs_directory": str(logs_dir),
+                        "error": (
+                            f"{len(all_files)} files under logs/ exceeds the auto-scan limit of "
+                            f"{_MAX_AUTO_FILES}; call list_logs and pass specific log_files instead."
+                        ),
+                        "errors": [],
+                    }
+                targets = []
+                for f in all_files:
+                    if f["size_bytes"] > _MAX_AUTO_FILE_SIZE:
+                        skipped.append({"path": f["path"], "reason": "file too large for auto-scan; pass it explicitly via log_files"})
+                        continue
+                    if start_dt:
+                        file_mtime = datetime.fromisoformat(f["modified"]).replace(tzinfo=None)
+                        if file_mtime < start_dt:
+                            continue
+                    targets.append((f["path"], logs_dir / f["path"]))
+
+            # identifier -> aggregated summary
+            aggregated: dict[str, dict] = {}
+            truncated = False
+            total_blocks = 0
+            for batch_start in range(0, len(targets), _BATCH_SIZE):
+                if total_blocks >= _MAX_SCAN_BLOCKS:
+                    truncated = True
+                    break
+                batch = targets[batch_start : batch_start + _BATCH_SIZE]
+                batch_paths = [abs_path for _rel, abs_path in batch]
+                batch_cmd = _build_batch_scan_command(batch_paths, scan_patterns)
+                batch_timeout = _BATCH_TIMEOUT_BASE + _BATCH_TIMEOUT_PER_FILE * len(batch)
+                _exit_status, out, _err = run_command(client, batch_cmd, timeout=batch_timeout)
+                per_file_output = _split_batch_output(out, len(batch))
+
+                for (rel, _abs_path), file_out in zip(batch, per_file_output):
+                    if total_blocks >= _MAX_SCAN_BLOCKS:
+                        truncated = True
+                        break
+                    for block in _split_blocks(file_out):
+                        if total_blocks >= _MAX_SCAN_BLOCKS:
+                            truncated = True
+                            break
+
+                        # A single block can contain more than one matched line -
+                        # grep merges nearby matches into one continuous block when
+                        # their context windows overlap (e.g. two errors 3 lines
+                        # apart with -C 2). Each matched line is its own occurrence
+                        # and needs its own identification + nearest timestamp, not
+                        # just the block's first match.
+                        parsed = _parse_grep_block(block)
+                        match_indices = [i for i, (is_match, _) in enumerate(parsed) if is_match]
+
+                        for idx in match_indices:
+                            if total_blocks >= _MAX_SCAN_BLOCKS:
+                                truncated = True
+                                break
+
+                            matched_line = parsed[idx][1]
+                            found = identify(matched_line)
+                            if found is None:
+                                continue
+                            identifier, kind = found
+
+                            ts = _nearest_timestamp(parsed, idx)
+                            if ts is not None:
+                                if start_dt and ts < start_dt:
+                                    continue
+                                if end_dt and ts > end_dt:
+                                    continue
+
+                            entry = aggregated.get(identifier)
+                            if entry is None:
+                                entry = {
+                                    "identifier": identifier,
+                                    "type": kind,
+                                    "count": 0,
+                                    "first_seen": None,
+                                    "last_seen": None,
+                                    "files": [],
+                                    "sample_line": matched_line,
+                                }
+                                if include_context:
+                                    entry["sample_context"] = block
+                                aggregated[identifier] = entry
+
+                            entry["count"] += 1
+                            if rel not in entry["files"]:
+                                entry["files"].append(rel)
+                            if ts is not None:
+                                ts_iso = ts.isoformat()
+                                if entry["first_seen"] is None or ts_iso < entry["first_seen"]:
+                                    entry["first_seen"] = ts_iso
+                                if entry["last_seen"] is None or ts_iso > entry["last_seen"]:
+                                    entry["last_seen"] = ts_iso
+
+                            total_blocks += 1
+    except paramiko.AuthenticationException as e:
+        return {"server": server_ip, "logs_directory": str(logs_dir), "error": f"SSH authentication failed: {e}", "errors": []}
+    except (paramiko.SSHException, OSError, FileNotFoundError) as e:
+        return {"server": server_ip, "logs_directory": str(logs_dir), "error": f"SSH connection failed: {e}", "errors": []}
+
+    errors = sorted(aggregated.values(), key=lambda e: e["count"], reverse=True)
+
+    return {
+        "server": server_ip,
+        "logs_directory": str(logs_dir),
+        "patterns_used": scan_patterns,
+        "errors": errors,
         "truncated": truncated,
         "skipped_files": skipped,
     }
